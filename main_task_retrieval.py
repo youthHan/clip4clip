@@ -155,7 +155,8 @@ def init_device(args, local_rank):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu", local_rank)
 
-    n_gpu = torch.cuda.device_count()
+    # n_gpu = torch.cuda.device_count()
+    n_gpu = args.world_size
     logger.info("device: {} n_gpu: {}".format(device, n_gpu))
     args.n_gpu = n_gpu
 
@@ -543,7 +544,7 @@ def eval_epoch(args, model, test_dataloader, device, n_gpu):
                     batch_t_output_splits.append(batch_sequence_output_list[s_:e_])
                     batch_v_output_splits.append(batch_visual_output_list)
                 else:
-                    devc = torch.device('cuda:{}'.format(str(dev_id)))
+                    devc = torch.device('cuda:{}'.format(str(dev_id%torch.cuda.device_count())))
                     devc_batch_list = [tuple(t.to(devc) for t in b) for b in batch_list_t[s_:e_]]
                     batch_list_t_splits.append(devc_batch_list)
                     devc_batch_list = [tuple(t.to(devc) for t in b) for b in batch_list_v]
@@ -668,12 +669,12 @@ def main():
             train_sampler.set_epoch(epoch)
             tr_loss, global_step = train_epoch(epoch, args, model, train_dataloader, device, n_gpu, optimizer,
                                                scheduler, global_step, local_rank=args.local_rank)
-            if args.local_rank == 0:
+            if args.local_rank == 0 and args.rank == 0:
                 logger.info("Epoch %d/%s Finished, Train Loss: %f", epoch + 1, args.epochs, tr_loss)
 
                 output_model_file = None
-                ## Uncomment if want to save checkpoint
-                # output_model_file = save_model(epoch, args, model, type_name="")
+                # Uncomment if want to save checkpoint
+                output_model_file = save_model(epoch, args, model, type_name="")
 
                 ## Run on val dataset, this process is *TIME-consuming*.
                 # logger.info("Eval on val dataset")
@@ -685,13 +686,13 @@ def main():
                     best_output_model_file = output_model_file
                 logger.info("The best model is: {}, the R1 is: {:.4f}".format(best_output_model_file, best_score))
 
-        ## Uncomment if want to test on the best checkpoint
-        # if args.local_rank == 0:
+        # # Uncomment if want to test on the best checkpoint
+        # if args.local_rank == 0 and args.rank == 0:
         #     model = load_model(-1, args, n_gpu, device, model_file=best_output_model_file)
         #     eval_epoch(args, model, test_dataloader, device, n_gpu)
 
     elif args.do_eval:
-        if args.local_rank == 0:
+        if args.local_rank == 0 and args.rank == 0:
             eval_epoch(args, model, test_dataloader, device, n_gpu)
 
 if __name__ == "__main__":
