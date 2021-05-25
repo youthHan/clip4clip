@@ -10,7 +10,10 @@ import pandas as pd
 from collections import defaultdict
 import json
 import random
+import io
+import lmdb
 from dataloaders.rawvideo_util import RawVideoExtractor
+from dataloaders.rawvideo_util import extract_frames_from_video_binary
 
 class MSRVTT_DataLoader(Dataset):
     """MSRVTT dataset loader."""
@@ -197,9 +200,64 @@ class MSRVTT_TrainDataLoader(Dataset):
         self.rawVideoExtractor = RawVideoExtractor(framerate=feature_framerate, size=image_resolution)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "<|startoftext|>", "SEP_TOKEN": "<|endoftext|>",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
+        self.env = lmdb.open(
+            '/projects/np28/mfhan/ClipBERT/vis_db/msrvtt', readonly=True,
+            create=False)  # readahead=not _check_distributed()
+        self.txn = self.env.begin(buffers=True)
+    
+    def _load_video(self, video_id, num_clips=None, clip_idx=None,
+                    safeguard_duration=False, video_max_pts=None):
+        """Load and sample frames from video.
+        Apply transformation to the sampled frames.
+
+        Sample a clip:
+            - random: set num_clips and clip_idx to be None
+            - uniform: set num_clips=N, clip_idx=idx. e.g., num_clips=3
+                and clip_idx=1 will first segment the video into 3 clips,
+                then sample the 2nd clip.
+
+        Returns:
+            torch.float, in [0, 255], (n_frm=T, c, h, w)
+        """
+        assert (num_clips is None) == (clip_idx is None), "Both None, or both not None"
+        # (T, C, H, W) [0, 255]
+        io_stream = io.BytesIO(self.txn.get(str(video_id).encode("utf-8")))
+        raw_sampled_frms, video_max_pts = extract_frames_from_video_binary(
+            io_stream,
+            target_fps=self.fps,
+            num_frames=self.num_frm,
+            multi_thread_decode=False,
+            sampling_strategy=self.frm_sampling_strategy,
+            num_clips=num_clips,
+            clip_idx=clip_idx,
+            safeguard_duration=safeguard_duration,
+            video_max_pts=video_max_pts
+        )
+
+        if raw_sampled_frms is None:
+            return None, None
+        elif self._is_extreme_aspect_ratio(raw_sampled_frms, max_ratio=5.):
+            print(
+                f"Found extreme aspect ratio for video id {video_id}. Skip it")
+            return None, None
+
+        # raw_sampled_frms = raw_sampled_frms.float()
+        # resized_frms = self.img_resize(raw_sampled_frms)
+        # padded_frms = self.img_pad(resized_frms)
+        return raw_sampled_frms, video_max_pts
 
     def __len__(self):
         return self.sample_len
+
+    @classmethod
+    def _is_extreme_aspect_ratio(cls, tensor, max_ratio=5.):
+        """ find extreme aspect ratio, where longer side / shorter side > max_ratio
+        Args:
+            tensor: (*, H, W)
+            max_ratio: float, max ratio (>1).
+        """
+        h, w = tensor.shape[-2:]
+        return h / float(w) > max_ratio or h / float(w) < 1 / max_ratio
 
     def _get_text(self, video_id, caption=None):
         k = 1
@@ -258,6 +316,8 @@ class MSRVTT_TrainDataLoader(Dataset):
                 video_path = video_path.replace(".mp4", ".webm")
 
             raw_video_data = self.rawVideoExtractor.get_video_data(video_path)
+            # raw_video_data = self._load_video()
+
             raw_video_data = raw_video_data['video']
             if len(raw_video_data.shape) > 3:
                 raw_video_data_clip = raw_video_data
