@@ -361,12 +361,17 @@ def dataloader_lsmdc_test(args, tokenizer, subset="test"):
     return dataloader_msrvtt, len(lsmdc_testset)
 
 
-def save_model(epoch, args, model, type_name=""):
+def save_model(epoch, args, model, optimizer, type_name=""):
     # Only save the model it-self
     model_to_save = model.module if hasattr(model, 'module') else model
     output_model_file = os.path.join(
         args.output_dir, "pytorch_model.bin.{}{}".format("" if type_name=="" else type_name+".", epoch))
-    torch.save(model_to_save.state_dict(), output_model_file)
+    # torch.save(model_to_save.state_dict(), output_model_file)
+    torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict()
+            }, output_model_file)
     logger.info("Model saved to %s", output_model_file)
     return output_model_file
 
@@ -674,17 +679,17 @@ def main():
 
                 output_model_file = None
                 # Uncomment if want to save checkpoint
-                output_model_file = save_model(epoch, args, model, type_name="")
+                output_model_file = save_model(epoch, args, model, optimizer, type_name="")
 
                 ## Run on val dataset, this process is *TIME-consuming*.
                 # logger.info("Eval on val dataset")
                 # R1 = eval_epoch(args, model, val_dataloader, device, n_gpu)
 
-                R1 = eval_epoch(args, model, test_dataloader, device, n_gpu)
-                if best_score <= R1:
-                    best_score = R1
-                    best_output_model_file = output_model_file
-                logger.info("The best model is: {}, the R1 is: {:.4f}".format(best_output_model_file, best_score))
+                # R1 = eval_epoch(args, model, test_dataloader, device, n_gpu)
+                # if best_score <= R1:
+                #     best_score = R1
+                #     best_output_model_file = output_model_file
+                # logger.info("The best model is: {}, the R1 is: {:.4f}".format(best_output_model_file, best_score))
 
         # # Uncomment if want to test on the best checkpoint
         # if args.local_rank == 0 and args.rank == 0:
@@ -693,6 +698,7 @@ def main():
 
     elif args.do_eval:
         if args.local_rank == 0 and args.rank == 0:
+            n_gpu = torch.cuda.device_count()
             eval_epoch(args, model, test_dataloader, device, n_gpu)
 
 if __name__ == "__main__":
