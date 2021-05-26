@@ -1,2 +1,13 @@
 .git
 .idea
+
+*.pyc
+msrvtt_data/*
+msvd_data/*
+
+*.log
+*.out
+*.err
+
+*.zip
+ckpts/*
