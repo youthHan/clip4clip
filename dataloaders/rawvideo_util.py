@@ -7,9 +7,12 @@ from PIL import Image
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 # pip install opencv-python
 import cv2
+from mmcv.fileio import FileClient
+import io
 import av
 from dataloaders import decoder
 import logging
+import math
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -132,6 +135,106 @@ def extract_frames_from_video_binary(
         frames = frames.permute(0, 3, 1, 2)
     return frames, video_max_pts
 
+class DecordInit:
+    """Using decord to initialize the video_reader.
+
+    Decord: https://github.com/dmlc/decord
+
+    Required keys are "filename",
+    added or modified keys are "video_reader" and "total_frames".
+    """
+
+    def __init__(self, io_backend='disk', num_threads=1, **kwargs):
+        self.io_backend = io_backend
+        self.num_threads = num_threads
+        self.kwargs = kwargs
+        self.file_client = None
+
+    def __call__(self, video_file):
+        """Perform the Decord initialization.
+
+        Args:
+            results (dict): The resulting dict to be modified and passed
+                to the next transform in pipeline.
+        """
+        try:
+            import decord
+        except ImportError:
+            raise ImportError(
+                'Please run "pip install decord" to install Decord first.')
+
+        if self.file_client is None:
+            self.file_client = FileClient(self.io_backend, **self.kwargs)
+
+        file_obj = io.BytesIO(self.file_client.get(video_file))
+        container = decord.VideoReader(file_obj, num_threads=self.num_threads)
+        # results['video_reader'] = container
+        # results['total_frames'] = len(container)
+        return container
+
+    def __repr__(self):
+        repr_str = (f'{self.__class__.__name__}('
+                    f'io_backend={self.io_backend}, '
+                    f'num_threads={self.num_threads})')
+        return repr_str
+
+
+class DecordDecode:
+    """Using decord to decode the video.
+
+    Decord: https://github.com/dmlc/decord
+
+    Required keys are "video_reader", "filename" and "frame_inds",
+    added or modified keys are "imgs" and "original_shape".
+    """
+
+    # def __init__(self, io_backend='disk', num_threads=1, **kwargs):
+    #     self.io_backend = io_backend
+    #     self.num_threads = num_threads
+    #     self.kwargs = kwargs
+    #     self.file_client = None
+
+    def __call__(self, container, frame_inds):
+        """Perform the Decord decoding.
+
+        Args:
+            results (dict): The resulting dict to be modified and passed
+                to the next transform in pipeline.
+        """
+        # try:
+        #     import decord
+        # except ImportError:
+        #     raise ImportError(
+        #         'Please run "pip install decord" to install Decord first.')
+
+        # if self.file_client is None:
+        #     self.file_client = FileClient(self.io_backend, **self.kwargs)
+
+        # file_obj = io.BytesIO(self.file_client.get(video_file))
+        # container = decord.VideoReader(file_obj, num_threads=self.num_threads)
+        # # results['video_reader'] = container
+        # total_frames = len(container)
+        # frame_inds = np.arange(total_frames)
+
+        # if results['frame_inds'].ndim != 1:
+        #     results['frame_inds'] = np.squeeze(results['frame_inds'])
+
+        # Generate frame index mapping in order
+        frame_dict = {
+            idx: container[idx].asnumpy()
+            for idx in np.unique(frame_inds)
+        }
+
+        imgs = [frame_dict[idx] for idx in frame_inds]
+
+        del container
+
+        # results['imgs'] = imgs
+        # results['original_shape'] = imgs[0].shape[:2]
+        # results['img_shape'] = imgs[0].shape[:2]
+
+        return imgs
+
 
 class RawVideoExtractorCV2():
     def __init__(self, centercrop=False, size=224, framerate=-1, ):
@@ -222,5 +325,98 @@ class RawVideoExtractorCV2():
 
         return raw_video_data
 
+class RawVideoExtractorDecord():
+    def __init__(self, centercrop=False, size=224, framerate=-1, ):
+        self.centercrop = centercrop
+        self.size = size
+        self.framerate = framerate
+        self.transform = self._transform(self.size)
+        self.videoreader = DecordInit(num_threads=2)
+        self.decorder = DecordDecode()
+
+    def _transform(self, n_px):
+        return Compose([
+            Resize(n_px, interpolation=Image.BICUBIC),
+            CenterCrop(n_px),
+            lambda image: image.convert("RGB"),
+            ToTensor(),
+            Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
+
+    def video_to_tensor(self, video_file, preprocess, sample_fp=0, start_time=None, end_time=None):
+        if start_time is not None or end_time is not None:
+            assert isinstance(start_time, int) and isinstance(end_time, int) \
+                   and start_time > -1 and end_time > start_time
+        assert sample_fp > -1
+
+        # Samples a frame sample_fp X frames.
+        container = self.videoreader(video_file)     
+        frameCount = len(container)
+        fps = int(container.get_avg_fps())
+        total_duration = (frameCount + fps - 1) // fps
+        start_sec, end_sec = 0, total_duration
+
+        if start_time is not None:
+            assert False
+            start_sec, end_sec = start_time, end_time if end_time <= total_duration else total_duration
+        
+        interval = 1
+        if sample_fp > 0:
+            interval = fps // sample_fp
+        else:
+            sample_fp = fps
+        if interval == 0: interval = 1
+
+        inds = [ind for ind in np.arange(0, fps, interval)]
+        assert len(inds) >= sample_fp
+        inds = inds[:sample_fp]
+
+        ret = True
+        images, included = [], []
+
+        frame_inds = []
+        break_l = False
+        for sec in np.arange(start_sec, end_sec + 1):
+            sec_base = int(sec * fps)
+            for ind in inds:
+                if sec_base + ind >= frameCount: break_l = True
+                else: frame_inds.append(sec_base + ind)
+            if break_l: break
+
+        images = self.decorder(container, frame_inds)
+
+        images = [preprocess(Image.fromarray(frame).convert("RGB")) for frame in images]
+
+
+        if len(images) > 0:
+            video_data = th.tensor(np.stack(images))
+        else:
+            video_data = th.zeros(1)
+        return {'video': video_data}
+
+    def get_video_data(self, video_path, start_time=None, end_time=None):
+        image_input = self.video_to_tensor(video_path, self.transform, sample_fp=self.framerate, start_time=start_time, end_time=end_time)
+        return image_input
+
+    def process_raw_data(self, raw_video_data):
+        tensor_size = raw_video_data.size()
+        tensor = raw_video_data.view(-1, 1, tensor_size[-3], tensor_size[-2], tensor_size[-1])
+        return tensor
+
+    def process_frame_order(self, raw_video_data, frame_order=0):
+        # 0: ordinary order; 1: reverse order; 2: random order.
+        if frame_order == 0:
+            pass
+        elif frame_order == 1:
+            reverse_order = np.arange(raw_video_data.size(0) - 1, -1, -1)
+            raw_video_data = raw_video_data[reverse_order, ...]
+        elif frame_order == 2:
+            random_order = np.arange(raw_video_data.size(0))
+            np.random.shuffle(random_order)
+            raw_video_data = raw_video_data[random_order, ...]
+
+        return raw_video_data
+
 # An ordinary video frame extractor based CV2
-RawVideoExtractor = RawVideoExtractorCV2
+# RawVideoExtractor = RawVideoExtractorCV2
+RawVideoExtractor = RawVideoExtractorDecord

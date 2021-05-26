@@ -30,6 +30,7 @@ def get_args(description='CLIP4Clip on Retrieval Task'):
     parser.add_argument("--do_pretrain", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_train", action='store_true', help="Whether to run training.")
     parser.add_argument("--do_eval", action='store_true', help="Whether to run eval on the dev set.")
+    parser.add_argument("--resume", action='store_true', help="Whether to resume training.")
 
     parser.add_argument('--train_csv', type=str, default='data/.train.csv', help='')
     parser.add_argument('--val_csv', type=str, default='data/.val.csv', help='')
@@ -170,6 +171,15 @@ def init_model(args, device, n_gpu, local_rank):
 
     if args.init_model:
         model_state_dict = torch.load(args.init_model, map_location='cpu')
+        if 'model_state_dict' in model_state_dict:
+            model_state_dict = model_state_dict['model_state_dict']
+            from collections import OrderedDict
+            model_state_dict_wo_module = OrderedDict()
+            for k,v in model_state_dict.items():
+                if k.startswith('module.'):
+                    k = k[7:]
+                model_state_dict_wo_module.update({k:v})
+            model_state_dict = model_state_dict_wo_module
     else:
         model_state_dict = None
 
@@ -211,6 +221,12 @@ def prep_optimizer(args, model, num_train_optimization_steps, device, n_gpu, loc
                          schedule='warmup_cosine', b1=0.9, b2=0.98, e=1e-6,
                          t_total=num_train_optimization_steps, weight_decay=weight_decay,
                          max_grad_norm=1.0)
+    # TODO: resume optimizer
+    if args.resume:
+        assert args.init_model
+        model_state_dict = torch.load(args.init_model, map_location='cpu')
+        assert 'optimizer_state_dict' in model_state_dict
+        optimizer.load_state_dict(model_state_dict['optimizer_state_dict'])
 
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank, find_unused_parameters=True)
@@ -369,7 +385,7 @@ def save_model(epoch, args, model, optimizer, type_name=""):
     # torch.save(model_to_save.state_dict(), output_model_file)
     torch.save({
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': model_to_save.state_dict(),
             'optimizer_state_dict': optimizer.state_dict()
             }, output_model_file)
     logger.info("Model saved to %s", output_model_file)

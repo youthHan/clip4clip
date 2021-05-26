@@ -13,6 +13,7 @@ import random
 import io
 import lmdb
 from dataloaders.rawvideo_util import RawVideoExtractor
+# from dataloaders.rawvideo_util import RawVideoExtractorCV2
 from dataloaders.rawvideo_util import extract_frames_from_video_binary
 
 class MSRVTT_DataLoader(Dataset):
@@ -198,6 +199,7 @@ class MSRVTT_TrainDataLoader(Dataset):
             self.sample_len = len(self.csv)
 
         self.rawVideoExtractor = RawVideoExtractor(framerate=feature_framerate, size=image_resolution)
+        # self.rawVideoExtractorCV2 = RawVideoExtractorCV2(framerate=feature_framerate, size=image_resolution)
         self.SPECIAL_TOKEN = {"CLS_TOKEN": "<|startoftext|>", "SEP_TOKEN": "<|endoftext|>",
                               "MASK_TOKEN": "[MASK]", "UNK_TOKEN": "[UNK]", "PAD_TOKEN": "[PAD]"}
         self.env = lmdb.open(
@@ -316,6 +318,8 @@ class MSRVTT_TrainDataLoader(Dataset):
                 video_path = video_path.replace(".mp4", ".webm")
 
             raw_video_data = self.rawVideoExtractor.get_video_data(video_path)
+            # raw_video_datacv2 = self.rawVideoExtractorCV2.get_video_data(video_path)
+            # assert (raw_video_data['video'] - raw_video_datacv2['video']).sum()==0
             # raw_video_data = self._load_video()
 
             raw_video_data = raw_video_data['video']
